@@ -222,8 +222,82 @@ let difficulty = null; // null = not chosen yet
 
 function getDiff() { return DIFFICULTIES[difficulty] || DIFFICULTIES.normal; }
 
+// ─── SUPABASE ─────────────────────────────────────────────────
+const SB_URL = 'https://dzamkshbpagbdcxppbtg.supabase.co';
+const SB_KEY = 'sb_publishable_saBQzKQj96UEg1iwuSttHw_RNOSIU8Q';
+const GAME_ID = 'noir';
+
+async function sbFetch(path, options) {
+  const res = await fetch(SB_URL + path, {
+    ...options,
+    headers: {
+      'apikey': SB_KEY,
+      'Authorization': 'Bearer ' + SB_KEY,
+      'Content-Type': 'application/json',
+      ...(options && options.headers)
+    }
+  });
+  return res.json();
+}
+
+async function submitScore(name, score, difficulty) {
+  try {
+    await sbFetch('/rest/v1/scores', {
+      method: 'POST',
+      body: JSON.stringify({ name, score, difficulty, game: GAME_ID, device_id: deviceId })
+    });
+  } catch(e) {}
+}
+
+async function getLeaderboard(difficulty) {
+  try {
+    const data = await sbFetch(
+      `/rest/v1/scores?game=eq.${GAME_ID}&difficulty=eq.${difficulty}&order=score.desc&limit=10`,
+      { headers: { 'Prefer': 'return=representation' } }
+    );
+    return Array.isArray(data) ? data : [];
+  } catch(e) { return []; }
+}
+
+async function getPlayerRank(score, difficulty) {
+  try {
+    const data = await sbFetch(
+      `/rest/v1/scores?game=eq.${GAME_ID}&difficulty=eq.${difficulty}&score=gte.${score}`,
+      { headers: { 'Prefer': 'return=representation' } }
+    );
+    return Array.isArray(data) ? data.length : null;
+  } catch(e) { return null; }
+}
+
+// ─── PLAYER ───────────────────────────────────────────────────
+let deviceId = localStorage.getItem('noir_device_id');
+if (!deviceId) {
+  deviceId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+  localStorage.setItem('noir_device_id', deviceId);
+}
+
+let playerName = localStorage.getItem('noir_player_name') || null;
+let playerRank = null;
+let leaderboard = [];
+let leaderboardDiff = null;
+
+function askPlayerName() {
+  if (playerName !== null) return;
+  const name = prompt('Введи своё имя для таблицы рекордов\n(или отмени чтобы играть анонимно)');
+  if (name && name.trim()) {
+    playerName = name.trim().slice(0, 20);
+    localStorage.setItem('noir_player_name', playerName);
+  } else {
+    playerName = '';
+    localStorage.setItem('noir_player_name', '');
+  }
+}
+
 // ─── GAME STATE ───────────────────────────────────────────────
-let state = 'difficulty'; // difficulty | idle | playing | dead
+let state = 'difficulty'; // difficulty | idle | playing | dead | leaderboard
 let score = 0;
 let bestScores = { journalist: 0, veryeasy: 0, easy: 0, normal: 0 };
 let bestScore = 0;
@@ -678,9 +752,26 @@ function drawUI() {
   }
 
   if (state === 'idle') {
-    // title
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+    // Кнопка таблицы — сверху
+    const lbBtnW = 220, lbBtnH = 44, lbBtnX = BASE_W / 2 - 110, lbBtnY = 18;
+    ctx.shadowColor = 'rgba(255,220,100,0.4)';
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = 'rgba(180,140,40,0.3)';
+    ctx.beginPath();
+    rr(lbBtnX, lbBtnY, lbBtnW, lbBtnH, 8);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255,220,100,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    rr(lbBtnX, lbBtnY, lbBtnW, lbBtnH, 8);
+    ctx.stroke();
+    ctx.fillStyle = '#ffe880';
+    ctx.font = 'bold 16px Georgia';
+    ctx.fillText('🏆 таблица рекордов', BASE_W / 2, lbBtnY + 28);
 
     ctx.fillStyle = 'rgba(240,235,200,0.95)';
     ctx.font = 'italic bold 46px Georgia';
@@ -688,26 +779,30 @@ function drawUI() {
 
     ctx.fillStyle = 'rgba(180,180,150,0.7)';
     ctx.font = 'italic 16px Georgia';
-    ctx.fillText('a cat lost in the city night', BASE_W / 2, BASE_H / 2 - 30);
+    ctx.fillText('кот потерялся в ночном городе', BASE_W / 2, BASE_H / 2 - 30);
 
-    // show chosen difficulty
-    const dLabel = getDiff().label;
+    const DIFF_LABELS_RU = { journalist: 'Игрожур', veryeasy: 'Очень легко', easy: 'Легко', normal: 'Нормально' };
     ctx.fillStyle = 'rgba(200,190,140,0.65)';
     ctx.font = '13px Georgia';
-    ctx.fillText('difficulty · ' + dLabel, BASE_W / 2, BASE_H / 2 + 10);
+    ctx.fillText('сложность · ' + (DIFF_LABELS_RU[difficulty] || ''), BASE_W / 2, BASE_H / 2 + 10);
 
-    ctx.fillStyle = 'rgba(240,235,200,0.6)';
-    ctx.font = '15px Georgia';
-    // pulse
     const pulse = 0.5 + Math.sin(frames * 0.06) * 0.5;
     ctx.globalAlpha = 0.5 + pulse * 0.5;
-    ctx.fillText('tap to begin', BASE_W / 2, BASE_H / 2 + 38);
+    ctx.fillStyle = 'rgba(240,235,200,0.6)';
+    ctx.font = '15px Georgia';
+    ctx.fillText('нажми чтобы начать', BASE_W / 2, BASE_H / 2 + 38);
     ctx.globalAlpha = 1;
 
     if (bestScore > 0) {
       ctx.fillStyle = 'rgba(200,200,160,0.6)';
       ctx.font = '13px Georgia';
-      ctx.fillText('best · ' + bestScore, BASE_W / 2, BASE_H / 2 + 60);
+      ctx.fillText('рекорд · ' + bestScore, BASE_W / 2, BASE_H / 2 + 60);
+    }
+
+    if (playerName) {
+      ctx.fillStyle = 'rgba(200,180,120,0.5)';
+      ctx.font = '12px Georgia';
+      ctx.fillText('👤 ' + playerName, BASE_W / 2, BASE_H / 2 + 82);
     }
   }
 
@@ -720,27 +815,39 @@ function drawUI() {
       ctx.globalAlpha = alpha;
       ctx.fillStyle = '#e0d0b0';
       ctx.font = 'italic bold 32px Georgia';
-      ctx.fillText('the cat fell', BASE_W / 2, BASE_H / 2 - 50);
+      ctx.fillText('кот упал!', BASE_W / 2, BASE_H / 2 - 60);
 
       ctx.fillStyle = '#f0f0e0';
       ctx.font = 'bold 54px Georgia';
-      ctx.fillText(score, BASE_W / 2, BASE_H / 2 + 10);
+      ctx.fillText(score, BASE_W / 2, BASE_H / 2 - 5);
 
       if (score >= bestScore && score > 0) {
         ctx.fillStyle = '#f0d060';
         ctx.font = 'italic 15px Georgia';
-        ctx.fillText('new record', BASE_W / 2, BASE_H / 2 + 35);
+        ctx.fillText('новый рекорд!', BASE_W / 2, BASE_H / 2 + 22);
+      }
+
+      if (playerName && score > 0) {
+        if (playerRank === null) {
+          ctx.fillStyle = 'rgba(200,180,120,0.6)';
+          ctx.font = 'italic 13px Georgia';
+          ctx.fillText('отправляем результат...', BASE_W / 2, BASE_H / 2 + 44);
+        } else {
+          ctx.fillStyle = 'rgba(255,220,100,0.9)';
+          ctx.font = 'bold 15px Georgia';
+          ctx.fillText('🏆 вы #' + playerRank + ' в таблице!', BASE_W / 2, BASE_H / 2 + 44);
+        }
       }
 
       const pulse = 0.5 + Math.sin(frames * 0.08) * 0.5;
       ctx.globalAlpha = alpha * (0.5 + pulse * 0.5);
       ctx.fillStyle = '#c0b890';
       ctx.font = '14px Georgia';
-      ctx.fillText('tap to try again', BASE_W / 2, BASE_H / 2 + 70);
+      ctx.fillText('нажми чтобы попробовать снова', BASE_W / 2, BASE_H / 2 + 72);
       ctx.globalAlpha = alpha * 0.6;
       ctx.font = '12px Georgia';
       ctx.fillStyle = '#aaa088';
-      ctx.fillText('tap here to change difficulty ↓', BASE_W / 2, BASE_H - 30);
+      ctx.fillText('сменить сложность ↓', BASE_W / 2, BASE_H - 30);
       ctx.globalAlpha = 1;
     }
   }
@@ -775,6 +882,13 @@ function die() {
   playMeowSad();
   if (score > bestScores[difficulty]) bestScores[difficulty] = score;
   bestScore = bestScores[difficulty];
+  playerRank = null;
+
+  if (playerName && score > 0) {
+    submitScore(playerName, score, difficulty).then(() => {
+      getPlayerRank(score, difficulty).then(rank => { playerRank = rank; });
+    });
+  }
 }
 
 function reset() {
@@ -792,13 +906,85 @@ function reset() {
   state = 'playing';
 }
 
+// ─── LEADERBOARD SCREEN ───────────────────────────────────────
+function drawLeaderboard() {
+  ctx.fillStyle = 'rgba(6,6,15,0.96)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+  ctx.textAlign = 'center';
+
+  // Кнопка назад — сверху слева
+  ctx.fillStyle = 'rgba(180,140,40,0.2)';
+  ctx.beginPath();
+  rr(15, 12, 90, 36, 6);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,220,100,0.4)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  rr(15, 12, 90, 36, 6);
+  ctx.stroke();
+  ctx.fillStyle = '#ffe880';
+  ctx.font = 'bold 14px Georgia';
+  ctx.textAlign = 'left';
+  ctx.fillText('← назад', 28, 35);
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = 'rgba(240,235,200,0.95)';
+  ctx.font = 'italic bold 26px Georgia';
+  ctx.fillText('🏆 таблица рекордов', BASE_W / 2, 62);
+
+  const diffNames = { journalist: 'Игрожур', veryeasy: 'Очень легко', easy: 'Легко', normal: 'Нормально' };
+  ctx.fillStyle = 'rgba(180,180,150,0.7)';
+  ctx.font = 'italic 14px Georgia';
+  ctx.fillText(diffNames[leaderboardDiff] || '', BASE_W / 2, 82);
+
+  if (leaderboard.length === 0) {
+    ctx.fillStyle = 'rgba(200,190,140,0.6)';
+    ctx.font = '14px Georgia';
+    ctx.fillText('загружаем...', BASE_W / 2, BASE_H / 2);
+  } else {
+    leaderboard.forEach((row, i) => {
+      const y = 118 + i * 48;
+      const isMe = row.device_id === deviceId;
+
+      ctx.fillStyle = isMe ? 'rgba(255,200,50,0.12)' : 'rgba(255,255,255,0.03)';
+      ctx.beginPath();
+      rr(20, y - 28, BASE_W - 40, 40, 4);
+      ctx.fill();
+      if (isMe) {
+        ctx.strokeStyle = 'rgba(255,220,100,0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        rr(20, y - 28, BASE_W - 40, 40, 4);
+        ctx.stroke();
+      }
+
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1) + '.';
+      ctx.fillStyle = isMe ? '#ffe880' : 'rgba(200,190,140,0.7)';
+      ctx.font = i < 3 ? '18px Georgia' : '14px Georgia';
+      ctx.textAlign = 'left';
+      ctx.fillText(medal, 32, y);
+
+      ctx.fillStyle = isMe ? '#fff0a0' : '#d0c8a8';
+      ctx.font = '15px Georgia';
+      ctx.fillText(row.name.slice(0, 18), 72, y);
+
+      ctx.fillStyle = isMe ? '#ffe060' : '#f0f0d0';
+      ctx.font = 'bold 18px Georgia';
+      ctx.textAlign = 'right';
+      ctx.fillText(row.score, BASE_W - 32, y);
+
+      ctx.textAlign = 'center';
+    });
+  }
+}
+
 // ─── INPUT ────────────────────────────────────────────────────
 const DIFF_ORDER = ['journalist', 'veryeasy', 'easy', 'normal'];
 const DIFF_HINTS = {
   journalist: 'для игрожуров 🐾',
-  veryeasy:   'wide gaps · slow',
-  easy:       'relaxed',
-  normal:     'classic'
+  veryeasy:   'медленно',
+  easy:       'расслабленно',
+  normal:     'классика'
 };
 let diffBtnRects = [];
 
@@ -817,10 +1003,11 @@ function drawDifficultyScreen() {
 
   ctx.fillStyle = 'rgba(200,190,140,0.8)';
   ctx.font = '12px Georgia';
-  ctx.fillText('CHOOSE DIFFICULTY', BASE_W / 2, BASE_H / 2 - 68);
+  ctx.fillText('ВЫБЕРИ СЛОЖНОСТЬ', BASE_W / 2, BASE_H / 2 - 68);
 
   diffBtnRects = [];
   const btnW = 260, btnH = 44, btnX = BASE_W / 2 - btnW / 2;
+  const DIFF_LABELS_RU = { journalist: 'Игрожур', veryeasy: 'Очень легко', easy: 'Легко', normal: 'Нормально' };
   DIFF_ORDER.forEach((d, i) => {
     const btnY = BASE_H / 2 - 50 + i * 54;
     diffBtnRects.push({ d, x: btnX, y: btnY, w: btnW, h: btnH });
@@ -838,8 +1025,7 @@ function drawDifficultyScreen() {
     ctx.fillStyle = '#f0ead8';
     ctx.font = '16px Georgia';
     ctx.textAlign = 'left';
-    const label = d === 'journalist' ? 'VG Journalist' : DIFFICULTIES[d].label;
-    ctx.fillText(label, btnX + 14, btnY + 28);
+    ctx.fillText(DIFF_LABELS_RU[d], btnX + 14, btnY + 28);
 
     ctx.fillStyle = 'rgba(200,190,140,0.6)';
     ctx.font = 'italic 12px Georgia';
@@ -866,13 +1052,29 @@ function handleDiffTap(px, py) {
 
 function handleTap(px, py) {
   if (state === 'difficulty') { handleDiffTap(px, py); return; }
+
+  const rect = canvas.getBoundingClientRect();
+  const cx = (px - rect.left) * (BASE_W / rect.width);
+  const cy = (py - rect.top) * (BASE_H / rect.height);
+
+  if (state === 'leaderboard') {
+    if (cy < 50 && cx < 110) { state = 'idle'; }
+    return;
+  }
+
   if (state === 'idle') {
+    if (cy < 62) {
+      leaderboardDiff = difficulty;
+      leaderboard = [];
+      state = 'leaderboard';
+      getLeaderboard(difficulty).then(rows => { leaderboard = rows; });
+      return;
+    }
+    askPlayerName();
     reset();
   } else if (state === 'playing') {
     cat.jump();
   } else if (state === 'dead' && cat.deathTimer > 40) {
-    const rect = canvas.getBoundingClientRect();
-    const cy = (py - rect.top) * (BASE_H / rect.height);
     if (cy > BASE_H - 55) {
       state = 'difficulty'; pipes = []; scoreParticles = [];
     } else {
@@ -901,6 +1103,14 @@ function loop() {
     drawCityscape();
     drawSmoke();
     drawDifficultyScreen();
+    return;
+  }
+
+  if (state === 'leaderboard') {
+    drawBackground();
+    drawCityscape();
+    drawSmoke();
+    drawLeaderboard();
     return;
   }
 
