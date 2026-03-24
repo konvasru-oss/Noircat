@@ -218,9 +218,49 @@ const DIFFICULTIES = {
   easy:       { label: 'Easy',            gravity: 0.35, jumpForce: -8.8, pipeSpeed: 2.2, pipeGap: 180, pipeInterval: 110 },
   normal:     { label: 'Normal',          gravity: 0.45, jumpForce: -9.5, pipeSpeed: 2.8, pipeGap: 155, pipeInterval: 95  },
 };
-let difficulty = null; // null = not chosen yet
+let difficulty = null;
 
-function getDiff() { return DIFFICULTIES[difficulty] || DIFFICULTIES.normal; }
+function getDiff() {
+  if (gameMode === 'story') {
+    const sl = STORY_LEVELS[Math.min(storyLevel - 1, STORY_LEVELS.length - 1)];
+    return sl;
+  }
+  return DIFFICULTIES[difficulty] || DIFFICULTIES.normal;
+}
+
+// ─── GAME MODE ────────────────────────────────────────────────
+let gameMode = null; // 'endless' | 'story'
+
+// ─── STORY LEVELS ─────────────────────────────────────────────
+const STORY_LEVELS = [
+  { pipes:3, gravity:0.12, jumpForce:-6.0, pipeSpeed:1.0, pipeGap:290, pipeInterval:170 },
+  { pipes:3, gravity:0.13, jumpForce:-6.2, pipeSpeed:1.1, pipeGap:275, pipeInterval:165 },
+  { pipes:4, gravity:0.15, jumpForce:-6.5, pipeSpeed:1.2, pipeGap:260, pipeInterval:158 },
+  { pipes:4, gravity:0.18, jumpForce:-7.0, pipeSpeed:1.4, pipeGap:245, pipeInterval:150 },
+  { pipes:5, gravity:0.21, jumpForce:-7.4, pipeSpeed:1.6, pipeGap:228, pipeInterval:140 },
+  { pipes:5, gravity:0.24, jumpForce:-7.8, pipeSpeed:1.8, pipeGap:215, pipeInterval:132 },
+  { pipes:5, gravity:0.27, jumpForce:-8.0, pipeSpeed:2.0, pipeGap:205, pipeInterval:125 },
+  { pipes:6, gravity:0.30, jumpForce:-8.3, pipeSpeed:2.1, pipeGap:195, pipeInterval:118 },
+  { pipes:6, gravity:0.33, jumpForce:-8.6, pipeSpeed:2.2, pipeGap:185, pipeInterval:112 },
+  { pipes:6, gravity:0.35, jumpForce:-8.8, pipeSpeed:2.2, pipeGap:180, pipeInterval:110 },
+];
+
+// Story state
+let storyLevel = 1;
+let storyTotalScore = 0;
+let storyPipesDone = 0;
+let storyBowlX = 9999;
+let storyBowlTriggered = false;
+let storyCompleteTimer = 0;
+let storyBestLevel = parseInt(localStorage.getItem('noir_story_best') || '0');
+let kibbleParticles = [];
+let storyDeathsThisLevel = 0;  // смертей на текущем уровне
+let storyCleanStreak = 0;      // чистых уровней подряд
+let storyPlayerRank = null;
+let storyLeaderboard = [];
+let storyLbVisible = false;
+
+const GAME_VERSION = 'v1.2';
 
 // ─── SUPABASE ─────────────────────────────────────────────────
 const SB_URL = 'https://dzamkshbpagbdcxppbtg.supabase.co';
@@ -269,6 +309,36 @@ async function getPlayerRank(score, difficulty) {
   } catch(e) { return null; }
 }
 
+// Story leaderboard — game: 'noir_story', difficulty: 'story'
+async function submitStoryScore(name, totalScore, level) {
+  try {
+    await sbFetch('/rest/v1/scores', {
+      method: 'POST',
+      body: JSON.stringify({ name, score: totalScore, difficulty: 'story_lvl' + level, game: 'noir_story', device_id: deviceId })
+    });
+  } catch(e) {}
+}
+
+async function getStoryLeaderboard() {
+  try {
+    const data = await sbFetch(
+      `/rest/v1/scores?game=eq.noir_story&order=score.desc&limit=10`,
+      { headers: { 'Prefer': 'return=representation' } }
+    );
+    return Array.isArray(data) ? data : [];
+  } catch(e) { return []; }
+}
+
+async function getStoryPlayerRank(totalScore) {
+  try {
+    const data = await sbFetch(
+      `/rest/v1/scores?game=eq.noir_story&score=gte.${totalScore}`,
+      { headers: { 'Prefer': 'return=representation' } }
+    );
+    return Array.isArray(data) ? data.length : null;
+  } catch(e) { return null; }
+}
+
 // ─── PLAYER ───────────────────────────────────────────────────
 let deviceId = localStorage.getItem('noir_device_id');
 if (!deviceId) {
@@ -297,7 +367,7 @@ function askPlayerName() {
 }
 
 // ─── GAME STATE ───────────────────────────────────────────────
-let state = 'difficulty'; // difficulty | idle | playing | dead | leaderboard
+let state = 'mainmenu'; // mainmenu | difficulty | idle | playing | dead | leaderboard | levelcomplete
 let score = 0;
 let bestScores = { journalist: 0, veryeasy: 0, easy: 0, normal: 0 };
 let bestScore = 0;
@@ -477,10 +547,318 @@ const cat = {
   }
 };
 
+// Победный мяу — уровень пройден
+function playMeowWin() {
+  try {
+    const ac = getAudio();
+    const t = ac.currentTime;
+    for (let i = 0; i < 2; i++) {
+      const o = i * 0.35;
+      const osc = ac.createOscillator(), gain = ac.createGain(), filt = ac.createBiquadFilter();
+      filt.type = 'bandpass'; filt.frequency.value = 1000; filt.Q.value = 3;
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(400 + i*80, t+o);
+      osc.frequency.linearRampToValueAtTime(900 + i*100, t+o+0.1);
+      osc.frequency.linearRampToValueAtTime(750 + i*80, t+o+0.28);
+      gain.gain.setValueAtTime(0, t+o);
+      gain.gain.linearRampToValueAtTime(0.2, t+o+0.03);
+      gain.gain.linearRampToValueAtTime(0, t+o+0.32);
+      osc.connect(filt); filt.connect(gain); gain.connect(ac.destination);
+      osc.start(t+o); osc.stop(t+o+0.35);
+    }
+  } catch(e) {}
+}
+
+// ─── BOWL ─────────────────────────────────────────────────────
+function drawBowl(x) {
+  const groundY = BASE_H - 80;
+  const bx = x, by = groundY - 28;
+
+  // Тёплое свечение
+  const glow = ctx.createRadialGradient(bx+20, by+10, 0, bx+20, by+10, 55);
+  glow.addColorStop(0, 'rgba(255,200,80,0.25)');
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(bx+20, by+10, 55, 0, Math.PI*2); ctx.fill();
+
+  // Миска — тело
+  ctx.fillStyle = '#c8803a';
+  ctx.beginPath(); ctx.ellipse(bx+20, by+20, 22, 10, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#8b4513';
+  ctx.beginPath(); ctx.ellipse(bx+20, by+17, 16, 7, 0, 0, Math.PI*2); ctx.fill();
+
+  // Корм
+  ctx.fillStyle = '#d4a048';
+  for (let ki = 0; ki < 5; ki++) {
+    ctx.beginPath(); ctx.arc(bx+10+ki*4, by+16+(ki%2)*2, 2.5, 0, Math.PI*2); ctx.fill();
+  }
+
+  // Пар
+  for (let pi = 0; pi < 3; pi++) {
+    const px2 = bx+12+pi*8, sw = Math.sin(frames*0.05+pi*2)*3;
+    ctx.strokeStyle = `rgba(255,220,150,${0.3-pi*0.08})`; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(px2, by+8); ctx.quadraticCurveTo(px2+sw, by+2, px2-sw, by-5); ctx.stroke();
+  }
+
+  ctx.fillStyle = 'rgba(255,220,120,0.7)';
+  ctx.font = 'italic 11px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('домой!', bx+20, by-12);
+}
+
+// ─── KIBBLE PARTICLES ─────────────────────────────────────────
+function spawnKibble(x, y) {
+  const colors = ['#d4a048','#e8b860','#c8803a','#f0c070','#b8602a'];
+  for (let i = 0; i < 30; i++) {
+    const angle = Math.PI*2*i/30 + Math.random()*0.3;
+    const spd = 2 + Math.random()*4;
+    kibbleParticles.push({ x, y, vx: Math.cos(angle)*spd, vy: Math.sin(angle)*spd-2,
+      life:1, size:2.5+Math.random()*2.5, color:colors[i%colors.length] });
+  }
+}
+
+function drawKibble() {
+  kibbleParticles = kibbleParticles.filter(p => p.life > 0);
+  kibbleParticles.forEach(p => {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.life -= 0.018;
+    ctx.globalAlpha = p.life; ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ─── STORY FUNCTIONS ──────────────────────────────────────────
+function storyResetLevel(isRetry) {
+  storyPipesDone = 0;
+  storyBowlX = 9999;
+  storyBowlTriggered = false;
+  if (!isRetry) storyDeathsThisLevel = 0; // сбрасываем только при переходе на новый уровень
+  kibbleParticles = [];
+  pipes = [];
+  score = 0;
+  frames = 0;
+  flash = 0;
+  cat.y = BASE_H / 2; cat.vy = 0; cat.angle = 0; cat.deathTimer = 0;
+  scoreParticles = []; smokeParticles = [];
+  state = 'playing';
+}
+
+function storyLevelComplete() {
+  if (state !== 'playing') return;
+  state = 'levelcomplete';
+  const cleanBonus = storyDeathsThisLevel === 0 ? 5 : 0;
+  storyTotalScore += score + cleanBonus;
+  storyCompleteTimer = 0;
+  if (storyDeathsThisLevel === 0) {
+    storyCleanStreak++;
+  } else {
+    storyCleanStreak = 0;
+  }
+  if (storyLevel > storyBestLevel) {
+    storyBestLevel = storyLevel;
+    localStorage.setItem('noir_story_best', storyBestLevel);
+  }
+  // Отправляем промежуточный результат
+  storyPlayerRank = null;
+  if (playerName) {
+    submitStoryScore(playerName, storyTotalScore, storyLevel).then(() => {
+      getStoryPlayerRank(storyTotalScore).then(rank => { storyPlayerRank = rank; });
+    });
+  }
+  playMeowWin();
+  spawnKibble(cat.x, cat.y);
+  spawnKibble(cat.x+15, cat.y-25);
+}
+
+// ─── MAIN MENU ────────────────────────────────────────────────
+let mainBtnRects = [];
+
+function drawMainMenu() {
+  ctx.fillStyle = 'rgba(0,0,15,0.93)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = 'rgba(240,235,200,0.95)';
+  ctx.font = 'italic bold 48px Georgia';
+  ctx.fillText('NOIR CAT', BASE_W/2, BASE_H/2 - 148);
+
+  ctx.fillStyle = 'rgba(180,180,150,0.7)';
+  ctx.font = 'italic 15px Georgia';
+  ctx.fillText('кот потерялся в ночном городе', BASE_W/2, BASE_H/2 - 116);
+
+  mainBtnRects = [];
+  const bW = 270, bH = 62, bX = BASE_W/2 - 135;
+
+  // Путь домой
+  const b1Y = BASE_H/2 - 74;
+  mainBtnRects.push({ mode:'story', x:bX, y:b1Y, w:bW, h:bH });
+  const wg = ctx.createLinearGradient(bX, b1Y, bX+bW, b1Y);
+  wg.addColorStop(0,'rgba(180,100,20,0.28)'); wg.addColorStop(1,'rgba(220,150,40,0.2)');
+  ctx.fillStyle = wg; ctx.beginPath(); rr(bX, b1Y, bW, bH, 8); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,180,60,0.55)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); rr(bX, b1Y, bW, bH, 8); ctx.stroke();
+  ctx.fillStyle = '#ffd878'; ctx.font = 'bold 18px Georgia';
+  ctx.fillText('🍜 путь домой', BASE_W/2, b1Y+26);
+  ctx.fillStyle = 'rgba(220,190,120,0.65)'; ctx.font = 'italic 12px Georgia';
+  ctx.fillText('уровни · миска в конце · история', BASE_W/2, b1Y+46);
+
+  // Бесконечный
+  const b2Y = BASE_H/2 + 8;
+  mainBtnRects.push({ mode:'endless', x:bX, y:b2Y, w:bW, h:bH });
+  ctx.fillStyle = 'rgba(40,40,80,0.35)'; ctx.beginPath(); rr(bX, b2Y, bW, bH, 8); ctx.fill();
+  ctx.strokeStyle = 'rgba(160,160,220,0.35)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); rr(bX, b2Y, bW, bH, 8); ctx.stroke();
+  ctx.fillStyle = '#c8d0f0'; ctx.font = 'bold 18px Georgia';
+  ctx.fillText('∞ бесконечный', BASE_W/2, b2Y+26);
+  ctx.fillStyle = 'rgba(160,170,210,0.65)'; ctx.font = 'italic 12px Georgia';
+  ctx.fillText('классика · таблица рекордов', BASE_W/2, b2Y+46);
+
+  if (storyBestLevel > 0) {
+    ctx.fillStyle = 'rgba(255,200,100,0.5)'; ctx.font = '12px Georgia';
+    ctx.fillText('лучший уровень · ' + storyBestLevel, BASE_W/2, BASE_H/2 + 94);
+  }
+
+  ctx.fillStyle = 'rgba(150,150,130,0.35)'; ctx.font = '11px Georgia';
+  ctx.fillText(GAME_VERSION, BASE_W/2, BASE_H - 18);
+}
+
+function handleMainMenuTap(px, py) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = (px - rect.left) * (BASE_W / rect.width);
+  const cy = (py - rect.top) * (BASE_H / rect.height);
+  for (const btn of mainBtnRects) {
+    if (cx >= btn.x && cx <= btn.x+btn.w && cy >= btn.y && cy <= btn.y+btn.h) {
+      gameMode = btn.mode;
+      if (gameMode === 'endless') {
+        state = 'difficulty';
+      } else {
+        storyLevel = 1; storyTotalScore = 0;
+        askPlayerName();
+        storyResetLevel();
+      }
+      return;
+    }
+  }
+}
+
+// ─── STORY LEADERBOARD ───────────────────────────────────────
+let storyLbBtnRect = null;
+
+function drawStoryLeaderboardScreen() {
+  ctx.fillStyle = 'rgba(6,6,15,0.96)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+  ctx.textAlign = 'center';
+
+  // Кнопка назад
+  ctx.fillStyle = 'rgba(180,140,40,0.2)';
+  ctx.beginPath(); rr(15, 12, 90, 36, 6); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,220,100,0.4)'; ctx.lineWidth = 1;
+  ctx.beginPath(); rr(15, 12, 90, 36, 6); ctx.stroke();
+  ctx.fillStyle = '#ffe880'; ctx.font = 'bold 14px Georgia';
+  ctx.textAlign = 'left'; ctx.fillText('← назад', 28, 35); ctx.textAlign = 'center';
+
+  ctx.fillStyle = 'rgba(240,235,200,0.95)'; ctx.font = 'italic bold 26px Georgia';
+  ctx.fillText('🏆 путь домой · рекорды', BASE_W/2, 62);
+  ctx.fillStyle = 'rgba(180,180,150,0.7)'; ctx.font = 'italic 13px Georgia';
+  ctx.fillText('итоговый счёт по всем уровням', BASE_W/2, 80);
+
+  if (storyLeaderboard.length === 0) {
+    ctx.fillStyle = 'rgba(200,190,140,0.6)'; ctx.font = '14px Georgia';
+    ctx.fillText('загружаем...', BASE_W/2, BASE_H/2);
+  } else {
+    storyLeaderboard.forEach((row, i) => {
+      const y = 118 + i * 46;
+      const isMe = row.device_id === deviceId;
+      ctx.fillStyle = isMe ? 'rgba(255,200,50,0.12)' : 'rgba(255,255,255,0.03)';
+      ctx.beginPath(); rr(20, y-26, BASE_W-40, 38, 4); ctx.fill();
+      if (isMe) {
+        ctx.strokeStyle = 'rgba(255,220,100,0.4)'; ctx.lineWidth = 1;
+        ctx.beginPath(); rr(20, y-26, BASE_W-40, 38, 4); ctx.stroke();
+      }
+      const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
+      ctx.fillStyle = isMe?'#ffe880':'rgba(200,190,140,0.7)';
+      ctx.font = i<3?'18px Georgia':'14px Georgia'; ctx.textAlign = 'left';
+      ctx.fillText(medal, 32, y);
+      ctx.fillStyle = isMe?'#fff0a0':'#d0c8a8'; ctx.font = '14px Georgia';
+      ctx.fillText(row.name.slice(0,18), 72, y);
+      // Уровень из difficulty field
+      const lvlStr = row.difficulty ? row.difficulty.replace('story_lvl','ур.') : '';
+      ctx.fillStyle = 'rgba(180,170,130,0.6)'; ctx.font = '11px Georgia';
+      ctx.textAlign = 'right'; ctx.fillText(lvlStr, BASE_W-80, y);
+      ctx.fillStyle = isMe?'#ffe060':'#f0f0d0'; ctx.font = 'bold 17px Georgia';
+      ctx.fillText(row.score, BASE_W-32, y);
+      ctx.textAlign = 'center';
+    });
+  }
+}
+
+// ─── LEVEL COMPLETE SCREEN ────────────────────────────────────
+function drawLevelComplete() {
+  const alpha = Math.min(1, storyCompleteTimer / 30);
+  ctx.fillStyle = `rgba(0,0,0,${alpha * 0.55})`; ctx.fillRect(0, 0, BASE_W, BASE_H);
+  ctx.globalAlpha = alpha; ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#ffd878'; ctx.font = 'italic bold 30px Georgia';
+  ctx.fillText('уровень ' + storyLevel + ' пройден!', BASE_W/2, BASE_H/2 - 100);
+
+  ctx.fillStyle = '#f0f0e0'; ctx.font = 'bold 50px Georgia';
+  ctx.fillText(score, BASE_W/2, BASE_H/2 - 48);
+  ctx.fillStyle = 'rgba(200,190,140,0.7)'; ctx.font = '13px Georgia';
+  ctx.fillText('труб пройдено', BASE_W/2, BASE_H/2 - 26);
+
+  const cleanBonus = storyDeathsThisLevel === 0 ? 5 : 0;
+  if (cleanBonus > 0) {
+    ctx.fillStyle = '#88ffaa'; ctx.font = 'bold 15px Georgia';
+    ctx.fillText('✨ без смертей  +' + cleanBonus, BASE_W/2, BASE_H/2 - 4);
+  }
+  if (storyCleanStreak >= 2) {
+    ctx.fillStyle = 'rgba(150,255,180,0.75)'; ctx.font = 'italic 12px Georgia';
+    ctx.fillText('серия: ' + storyCleanStreak + ' чистых подряд', BASE_W/2, BASE_H/2 + 14);
+  }
+
+  ctx.fillStyle = 'rgba(255,200,100,0.85)'; ctx.font = 'bold 15px Georgia';
+  ctx.fillText('итого: ' + storyTotalScore, BASE_W/2, BASE_H/2 + 34);
+
+  // Ранг
+  if (playerName) {
+    if (storyPlayerRank === null) {
+      ctx.fillStyle = 'rgba(200,180,120,0.6)'; ctx.font = 'italic 13px Georgia';
+      ctx.fillText('отправляем результат...', BASE_W/2, BASE_H/2 + 54);
+    } else {
+      ctx.fillStyle = 'rgba(255,220,100,0.9)'; ctx.font = 'bold 14px Georgia';
+      ctx.fillText('🏆 вы #' + storyPlayerRank + ' в таблице!', BASE_W/2, BASE_H/2 + 54);
+    }
+  }
+
+  // Кнопка таблицы
+  if (storyCompleteTimer > 40) {
+    const lbY = BASE_H/2 + 70;
+    storyLbBtnRect = { x: BASE_W/2-110, y: lbY, w: 220, h: 36 };
+    ctx.fillStyle = 'rgba(180,140,40,0.25)';
+    ctx.beginPath(); rr(storyLbBtnRect.x, lbY, 220, 36, 6); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,220,100,0.45)'; ctx.lineWidth = 1;
+    ctx.beginPath(); rr(storyLbBtnRect.x, lbY, 220, 36, 6); ctx.stroke();
+    ctx.fillStyle = '#ffe880'; ctx.font = 'bold 13px Georgia';
+    ctx.fillText('🏆 таблица рекордов', BASE_W/2, lbY + 23);
+  }
+
+  if (storyCompleteTimer > 60) {
+    const pulse = 0.5 + Math.sin(frames * 0.1) * 0.5;
+    ctx.globalAlpha = alpha * (0.5 + pulse * 0.5);
+    ctx.fillStyle = '#c0b890'; ctx.font = '14px Georgia';
+    ctx.fillText('нажми — следующий уровень', BASE_W/2, BASE_H/2 + 122);
+  }
+  ctx.globalAlpha = 1;
+}
+
 // ─── PIPES ────────────────────────────────────────────────────
 let pipes = [];
 
 function spawnPipe() {
+  if (gameMode === 'story') {
+    const lvl = STORY_LEVELS[Math.min(storyLevel-1, STORY_LEVELS.length-1)];
+    if (storyPipesDone >= lvl.pipes) return; // лимит труб достигнут
+    storyPipesDone++;
+  }
   const gap = getDiff().pipeGap;
   const gapY = 120 + Math.random() * (BASE_H - 80 - 120 - gap);
   pipes.push({ x: BASE_W + 30, gapY, scored: false });
@@ -731,23 +1109,38 @@ function drawScoreParticles() {
 
 // ─── UI ───────────────────────────────────────────────────────
 function drawUI() {
-  // score
   ctx.textAlign = 'center';
 
-  if (state === 'playing' || state === 'dead') {
-    // score shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.font = 'bold 42px Georgia';
-    ctx.fillText(score, BASE_W / 2 + 2, 72);
+  if (state === 'playing' || state === 'dead' || state === 'levelcomplete') {
+    if (gameMode === 'story') {
+      // Story HUD
+      ctx.fillStyle = 'rgba(255,210,80,0.85)';
+      ctx.font = 'bold 16px Georgia';
+      ctx.fillText('уровень ' + storyLevel, BASE_W/2, 36);
 
-    ctx.fillStyle = '#f0f0e0';
-    ctx.fillText(score, BASE_W / 2, 70);
-
-    // best
-    if (score > 0) {
-      ctx.fillStyle = 'rgba(200,200,160,0.5)';
-      ctx.font = '14px Georgia';
-      ctx.fillText('BEST ' + bestScore, BASE_W / 2, 88);
+      // Точки-трубы
+      const lvl = STORY_LEVELS[Math.min(storyLevel-1, STORY_LEVELS.length-1)];
+      const total = lvl.pipes, done = score;
+      const spacing = 18, dotsW = total * spacing;
+      const dotsStartX = BASE_W/2 - dotsW/2 + spacing/2;
+      for (let di = 0; di < total; di++) {
+        const dx = dotsStartX + di * spacing;
+        ctx.beginPath(); ctx.arc(dx, 52, 5, 0, Math.PI*2);
+        ctx.fillStyle = di < done ? '#ffd060' : 'rgba(200,190,140,0.3)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(200,190,140,0.4)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+    } else {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.font = 'bold 42px Georgia';
+      ctx.fillText(score, BASE_W/2+2, 72);
+      ctx.fillStyle = '#f0f0e0';
+      ctx.fillText(score, BASE_W/2, 70);
+      if (score > 0) {
+        ctx.fillStyle = 'rgba(200,200,160,0.5)';
+        ctx.font = '14px Georgia';
+        ctx.fillText('BEST ' + bestScore, BASE_W/2, 88);
+      }
     }
   }
 
@@ -755,107 +1148,89 @@ function drawUI() {
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(0, 0, BASE_W, BASE_H);
 
-    // Кнопка таблицы — сверху
-    const lbBtnW = 220, lbBtnH = 44, lbBtnX = BASE_W / 2 - 110, lbBtnY = 18;
-    ctx.shadowColor = 'rgba(255,220,100,0.4)';
-    ctx.shadowBlur = 12;
+    const lbBtnW = 220, lbBtnH = 44, lbBtnX = BASE_W/2-110, lbBtnY = 18;
+    ctx.shadowColor = 'rgba(255,220,100,0.4)'; ctx.shadowBlur = 12;
     ctx.fillStyle = 'rgba(180,140,40,0.3)';
-    ctx.beginPath();
-    rr(lbBtnX, lbBtnY, lbBtnW, lbBtnH, 8);
-    ctx.fill();
+    ctx.beginPath(); rr(lbBtnX, lbBtnY, lbBtnW, lbBtnH, 8); ctx.fill();
     ctx.shadowBlur = 0;
-    ctx.strokeStyle = 'rgba(255,220,100,0.6)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    rr(lbBtnX, lbBtnY, lbBtnW, lbBtnH, 8);
-    ctx.stroke();
-    ctx.fillStyle = '#ffe880';
-    ctx.font = 'bold 16px Georgia';
-    ctx.fillText('🏆 таблица рекордов', BASE_W / 2, lbBtnY + 28);
+    ctx.strokeStyle = 'rgba(255,220,100,0.6)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); rr(lbBtnX, lbBtnY, lbBtnW, lbBtnH, 8); ctx.stroke();
+    ctx.fillStyle = '#ffe880'; ctx.font = 'bold 16px Georgia';
+    ctx.fillText('🏆 таблица рекордов', BASE_W/2, lbBtnY+28);
 
-    ctx.fillStyle = 'rgba(240,235,200,0.95)';
-    ctx.font = 'italic bold 46px Georgia';
-    ctx.fillText('NOIR CAT', BASE_W / 2, BASE_H / 2 - 60);
+    ctx.fillStyle = 'rgba(240,235,200,0.95)'; ctx.font = 'italic bold 46px Georgia';
+    ctx.fillText('NOIR CAT', BASE_W/2, BASE_H/2-60);
+    ctx.fillStyle = 'rgba(180,180,150,0.7)'; ctx.font = 'italic 16px Georgia';
+    ctx.fillText('кот потерялся в ночном городе', BASE_W/2, BASE_H/2-30);
 
-    ctx.fillStyle = 'rgba(180,180,150,0.7)';
-    ctx.font = 'italic 16px Georgia';
-    ctx.fillText('кот потерялся в ночном городе', BASE_W / 2, BASE_H / 2 - 30);
-
-    const DIFF_LABELS_RU = { journalist: 'Игрожур', veryeasy: 'Очень легко', easy: 'Легко', normal: 'Нормально' };
-    ctx.fillStyle = 'rgba(200,190,140,0.65)';
-    ctx.font = '13px Georgia';
-    ctx.fillText('сложность · ' + (DIFF_LABELS_RU[difficulty] || ''), BASE_W / 2, BASE_H / 2 + 10);
+    const DIFF_LABELS_RU = { journalist:'Игрожур', veryeasy:'Очень легко', easy:'Легко', normal:'Нормально' };
+    ctx.fillStyle = 'rgba(200,190,140,0.65)'; ctx.font = '13px Georgia';
+    ctx.fillText('сложность · ' + (DIFF_LABELS_RU[difficulty] || ''), BASE_W/2, BASE_H/2+10);
 
     const pulse = 0.5 + Math.sin(frames * 0.06) * 0.5;
     ctx.globalAlpha = 0.5 + pulse * 0.5;
-    ctx.fillStyle = 'rgba(240,235,200,0.6)';
-    ctx.font = '15px Georgia';
-    ctx.fillText('нажми чтобы начать', BASE_W / 2, BASE_H / 2 + 38);
+    ctx.fillStyle = 'rgba(240,235,200,0.6)'; ctx.font = '15px Georgia';
+    ctx.fillText('нажми чтобы начать', BASE_W/2, BASE_H/2+38);
     ctx.globalAlpha = 1;
 
     if (bestScore > 0) {
-      ctx.fillStyle = 'rgba(200,200,160,0.6)';
-      ctx.font = '13px Georgia';
-      ctx.fillText('рекорд · ' + bestScore, BASE_W / 2, BASE_H / 2 + 60);
+      ctx.fillStyle = 'rgba(200,200,160,0.6)'; ctx.font = '13px Georgia';
+      ctx.fillText('рекорд · ' + bestScore, BASE_W/2, BASE_H/2+60);
     }
-
     if (playerName) {
-      ctx.fillStyle = 'rgba(200,180,120,0.5)';
-      ctx.font = '12px Georgia';
-      ctx.fillText('👤 ' + playerName, BASE_W / 2, BASE_H / 2 + 82);
+      ctx.fillStyle = 'rgba(200,180,120,0.5)'; ctx.font = '12px Georgia';
+      ctx.fillText('👤 ' + playerName, BASE_W/2, BASE_H/2+82);
     }
   }
 
   if (state === 'dead') {
     if (cat.deathTimer > 30) {
       const alpha = Math.min(1, (cat.deathTimer - 30) / 30);
-      ctx.fillStyle = `rgba(0,0,0,${alpha * 0.6})`;
-      ctx.fillRect(0, 0, BASE_W, BASE_H);
-
+      ctx.fillStyle = `rgba(0,0,0,${alpha*0.6})`; ctx.fillRect(0, 0, BASE_W, BASE_H);
       ctx.globalAlpha = alpha;
-      ctx.fillStyle = '#e0d0b0';
-      ctx.font = 'italic bold 32px Georgia';
-      ctx.fillText('кот упал!', BASE_W / 2, BASE_H / 2 - 60);
 
-      ctx.fillStyle = '#f0f0e0';
-      ctx.font = 'bold 54px Georgia';
-      ctx.fillText(score, BASE_W / 2, BASE_H / 2 - 5);
+      ctx.fillStyle = '#e0d0b0'; ctx.font = 'italic bold 32px Georgia';
+      ctx.fillText('кот упал!', BASE_W/2, BASE_H/2-60);
+      ctx.fillStyle = '#f0f0e0'; ctx.font = 'bold 54px Georgia';
+      ctx.fillText(score, BASE_W/2, BASE_H/2-5);
 
-      if (score >= bestScore && score > 0) {
-        ctx.fillStyle = '#f0d060';
-        ctx.font = 'italic 15px Georgia';
-        ctx.fillText('новый рекорд!', BASE_W / 2, BASE_H / 2 + 22);
-      }
-
-      if (playerName && score > 0) {
-        if (playerRank === null) {
-          ctx.fillStyle = 'rgba(200,180,120,0.6)';
-          ctx.font = 'italic 13px Georgia';
-          ctx.fillText('отправляем результат...', BASE_W / 2, BASE_H / 2 + 44);
-        } else {
-          ctx.fillStyle = 'rgba(255,220,100,0.9)';
-          ctx.font = 'bold 15px Georgia';
-          ctx.fillText('🏆 вы #' + playerRank + ' в таблице!', BASE_W / 2, BASE_H / 2 + 44);
+      if (gameMode === 'story') {
+        const lvl = STORY_LEVELS[Math.min(storyLevel-1, STORY_LEVELS.length-1)];
+        ctx.fillStyle = 'rgba(255,200,100,0.7)'; ctx.font = '14px Georgia';
+        ctx.fillText('уровень ' + storyLevel + '  ·  ' + score + ' / ' + lvl.pipes + ' труб', BASE_W/2, BASE_H/2+22);
+        const pulse = 0.5 + Math.sin(frames*0.08)*0.5;
+        ctx.globalAlpha = alpha*(0.5+pulse*0.5);
+        ctx.fillStyle = '#c0b890'; ctx.font = '14px Georgia';
+        ctx.fillText('нажми — попробовать снова', BASE_W/2, BASE_H/2+58);
+        ctx.globalAlpha = alpha*0.6; ctx.font = '12px Georgia'; ctx.fillStyle = '#aaa088';
+        ctx.fillText('в главное меню ↓', BASE_W/2, BASE_H-30);
+      } else {
+        if (score >= bestScore && score > 0) {
+          ctx.fillStyle = '#f0d060'; ctx.font = 'italic 15px Georgia';
+          ctx.fillText('новый рекорд!', BASE_W/2, BASE_H/2+22);
         }
+        if (playerName && score > 0) {
+          if (playerRank === null) {
+            ctx.fillStyle = 'rgba(200,180,120,0.6)'; ctx.font = 'italic 13px Georgia';
+            ctx.fillText('отправляем результат...', BASE_W/2, BASE_H/2+44);
+          } else {
+            ctx.fillStyle = 'rgba(255,220,100,0.9)'; ctx.font = 'bold 15px Georgia';
+            ctx.fillText('🏆 вы #' + playerRank + ' в таблице!', BASE_W/2, BASE_H/2+44);
+          }
+        }
+        const pulse = 0.5 + Math.sin(frames*0.08)*0.5;
+        ctx.globalAlpha = alpha*(0.5+pulse*0.5);
+        ctx.fillStyle = '#c0b890'; ctx.font = '14px Georgia';
+        ctx.fillText('нажми чтобы попробовать снова', BASE_W/2, BASE_H/2+72);
+        ctx.globalAlpha = alpha*0.6; ctx.font = '12px Georgia'; ctx.fillStyle = '#aaa088';
+        ctx.fillText('сменить сложность ↓', BASE_W/2, BASE_H-30);
       }
-
-      const pulse = 0.5 + Math.sin(frames * 0.08) * 0.5;
-      ctx.globalAlpha = alpha * (0.5 + pulse * 0.5);
-      ctx.fillStyle = '#c0b890';
-      ctx.font = '14px Georgia';
-      ctx.fillText('нажми чтобы попробовать снова', BASE_W / 2, BASE_H / 2 + 72);
-      ctx.globalAlpha = alpha * 0.6;
-      ctx.font = '12px Georgia';
-      ctx.fillStyle = '#aaa088';
-      ctx.fillText('сменить сложность ↓', BASE_W / 2, BASE_H - 30);
       ctx.globalAlpha = 1;
     }
   }
 
-  // Flash on score
   if (flash > 0) {
-    ctx.fillStyle = `rgba(255,255,200,${flash * 0.3})`;
-    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    ctx.fillStyle = `rgba(255,255,200,${flash*0.3})`; ctx.fillRect(0, 0, BASE_W, BASE_H);
     flash -= 0.06;
   }
 }
@@ -880,18 +1255,22 @@ function die() {
   state = 'dead';
   cat.vy = getDiff().jumpForce * 0.7;
   playMeowSad();
-  if (score > bestScores[difficulty]) bestScores[difficulty] = score;
-  bestScore = bestScores[difficulty];
-  playerRank = null;
-
-  if (playerName && score > 0) {
-    submitScore(playerName, score, difficulty).then(() => {
-      getPlayerRank(score, difficulty).then(rank => { playerRank = rank; });
-    });
+  if (gameMode === 'story') {
+    storyDeathsThisLevel++;
+  } else if (gameMode === 'endless') {
+    if (score > bestScores[difficulty]) bestScores[difficulty] = score;
+    bestScore = bestScores[difficulty];
+    playerRank = null;
+    if (playerName && score > 0) {
+      submitScore(playerName, score, difficulty).then(() => {
+        getPlayerRank(score, difficulty).then(rank => { playerRank = rank; });
+      });
+    }
   }
 }
 
 function reset() {
+  if (gameMode === 'story') { storyResetLevel(); return; }
   cat.y = BASE_H / 2;
   cat.vy = 0;
   cat.angle = 0;
@@ -1051,6 +1430,7 @@ function handleDiffTap(px, py) {
 }
 
 function handleTap(px, py) {
+  if (state === 'mainmenu') { handleMainMenuTap(px, py); return; }
   if (state === 'difficulty') { handleDiffTap(px, py); return; }
 
   const rect = canvas.getBoundingClientRect();
@@ -1059,6 +1439,27 @@ function handleTap(px, py) {
 
   if (state === 'leaderboard') {
     if (cy < 50 && cx < 110) { state = 'idle'; }
+    return;
+  }
+
+  if (state === 'storyleaderboard') {
+    if (cy < 50 && cx < 110) { state = 'levelcomplete'; }
+    return;
+  }
+
+  if (state === 'levelcomplete') {
+    if (storyCompleteTimer > 40 && storyLbBtnRect &&
+        cx >= storyLbBtnRect.x && cx <= storyLbBtnRect.x + storyLbBtnRect.w &&
+        cy >= storyLbBtnRect.y && cy <= storyLbBtnRect.y + storyLbBtnRect.h) {
+      state = 'storyleaderboard';
+      storyLeaderboard = [];
+      getStoryLeaderboard().then(rows => { storyLeaderboard = rows; });
+      return;
+    }
+    if (storyCompleteTimer > 60) {
+      storyLevel++;
+      storyResetLevel();
+    }
     return;
   }
 
@@ -1076,9 +1477,17 @@ function handleTap(px, py) {
     cat.jump();
   } else if (state === 'dead' && cat.deathTimer > 40) {
     if (cy > BASE_H - 55) {
-      state = 'difficulty'; pipes = []; scoreParticles = [];
+      if (gameMode === 'story') {
+        state = 'mainmenu'; pipes = []; scoreParticles = []; kibbleParticles = [];
+      } else {
+        state = 'difficulty'; pipes = []; scoreParticles = [];
+      }
     } else {
-      state = 'idle';
+      if (gameMode === 'story') {
+        storyResetLevel(true); // retry — смерти не сбрасываем
+      } else {
+        state = 'idle';
+      }
     }
   }
 }
@@ -1098,64 +1507,80 @@ function loop() {
   requestAnimationFrame(loop);
   frames++;
 
+  if (state === 'mainmenu') {
+    drawBackground(); drawCityscape(); drawSmoke(); drawMainMenu(); return;
+  }
   if (state === 'difficulty') {
-    drawBackground();
-    drawCityscape();
-    drawSmoke();
-    drawDifficultyScreen();
-    return;
+    drawBackground(); drawCityscape(); drawSmoke(); drawDifficultyScreen(); return;
   }
-
   if (state === 'leaderboard') {
-    drawBackground();
-    drawCityscape();
-    drawSmoke();
-    drawLeaderboard();
-    return;
+    drawBackground(); drawCityscape(); drawSmoke(); drawLeaderboard(); return;
   }
 
-  // Background
-  drawBackground();
+  if (state === 'storyleaderboard') {
+    drawBackground(); drawCityscape(); drawSmoke(); drawStoryLeaderboardScreen(); return;
+  }
 
-  drawCityscape();
-  drawSmoke();
+  drawBackground(); drawCityscape(); drawSmoke();
 
-  // Pipes
+  const d = getDiff();
+
   if (state === 'playing') {
-    const d = getDiff();
+    // Спавн труб
     if (frames % d.pipeInterval === 0) spawnPipe();
+
+    // Story: ставим миску после того как все трубы заспавнены и последняя пройдена
+    if (gameMode === 'story' && storyBowlX >= 9999) {
+      const lvl = STORY_LEVELS[Math.min(storyLevel-1, STORY_LEVELS.length-1)];
+      if (score === lvl.pipes) {
+        storyBowlX = BASE_W + 40;
+      }
+    }
+
+    // Двигаем миску
+    if (gameMode === 'story' && storyBowlX < 9999) {
+      storyBowlX -= d.pipeSpeed;
+      if (!storyBowlTriggered && storyBowlX < cat.x) {
+        storyBowlTriggered = true;
+        storyLevelComplete();
+      }
+    }
 
     pipes.forEach(p => {
       p.x -= d.pipeSpeed;
-
       if (!p.scored && p.x + 52 < cat.x) {
-        p.scored = true;
-        score++;
-        flash = 1;
-        playScore();
-        spawnScoreParticle(cat.x, cat.y - 30);
+        p.scored = true; score++; flash = 1;
+        playScore(); spawnScoreParticle(cat.x, cat.y - 30);
       }
-
       if (checkCollision(p)) die();
     });
-
     pipes = pipes.filter(p => p.x > -70);
+
   } else if (state === 'dead') {
     cat.deathTimer++;
-    pipes.forEach(p => p.x -= getDiff().pipeSpeed * 0.3); // slow drift
+    const slow = d.pipeSpeed * 0.3;
+    pipes.forEach(p => p.x -= slow);
+    if (gameMode === 'story' && storyBowlX < 9999) storyBowlX -= slow;
+
+  } else if (state === 'levelcomplete') {
+    storyCompleteTimer++;
+    const slow = d.pipeSpeed * 0.15;
+    pipes.forEach(p => p.x -= slow);
   }
 
   pipes.forEach(drawPipe);
 
-  // Cat
-  cat.update();
-  cat.draw();
+  // Миска
+  if (gameMode === 'story' && storyBowlX < 9999 && storyBowlX > -60) {
+    drawBowl(storyBowlX);
+  }
 
-  // Score particles
+  cat.update(); cat.draw();
+  drawKibble();
   drawScoreParticles();
-
-  // UI
   drawUI();
+
+  if (state === 'levelcomplete') drawLevelComplete();
 }
 
 loop();
