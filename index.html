@@ -717,7 +717,7 @@ function drawMainMenu() {
     ctx.fillText('лучший уровень · ' + storyBestLevel, BASE_W/2, BASE_H/2 + 94);
   }
 
-  ctx.fillStyle = 'rgba(150,150,130,0.35)'; ctx.font = '11px Georgia';
+  ctx.fillStyle = 'rgba(180,175,155,0.6)'; ctx.font = '11px Georgia';
   ctx.fillText(GAME_VERSION, BASE_W/2, BASE_H - 18);
 }
 
@@ -856,8 +856,13 @@ let pipes = [];
 function spawnPipe() {
   if (gameMode === 'story') {
     const lvl = STORY_LEVELS[Math.min(storyLevel-1, STORY_LEVELS.length-1)];
-    if (storyPipesDone >= lvl.pipes) return; // лимит труб достигнут
+    if (storyPipesDone >= lvl.pipes) return;
     storyPipesDone++;
+    // После последней трубы ставим миску близко — через полинтервала
+    if (storyPipesDone === lvl.pipes && storyBowlX >= 9999) {
+      const sd = getDiff();
+      storyBowlX = BASE_W + 30 + sd.pipeInterval * sd.pipeSpeed * 0.5;
+    }
   }
   const gap = getDiff().pipeGap;
   const gapY = 120 + Math.random() * (BASE_H - 80 - 120 - gap);
@@ -1528,14 +1533,6 @@ function loop() {
   if (state === 'playing') {
     // Спавн труб
     if (frames % d.pipeInterval === 0) spawnPipe();
-
-    // Story: ставим миску после того как все трубы заспавнены и последняя пройдена
-    if (gameMode === 'story' && storyBowlX >= 9999) {
-      const lvl = STORY_LEVELS[Math.min(storyLevel-1, STORY_LEVELS.length-1)];
-      if (score === lvl.pipes) {
-        storyBowlX = BASE_W + 40;
-      }
-    }
 
     // Двигаем миску
     if (gameMode === 'story' && storyBowlX < 9999) {
